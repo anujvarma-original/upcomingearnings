@@ -1,3 +1,4 @@
+```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -5,9 +6,7 @@ from pathlib import Path
 from datetime import datetime
 import smtplib
 from email.message import EmailMessage
-import json
 import time
-
 
 
 # =========================================================
@@ -15,9 +14,8 @@ import time
 # =========================================================
 
 TICKER_FILE = "tickers.txt"
-STATE_FILE = "earnings_alert_state.json"
 
-# Only alert on earnings within this many calendar days
+# Alert on earnings occurring within the next 10 days
 DAYS_AHEAD = 10
 
 
@@ -33,8 +31,9 @@ st.set_page_config(
 st.title("Earnings Alert Monitor")
 
 st.caption(
-    f"Automatically checks for earnings occurring "
-    f"within the next {DAYS_AHEAD} days."
+    f"Checks for earnings occurring within the next "
+    f"{DAYS_AHEAD} calendar days and sends an email "
+    f"for every qualifying ticker."
 )
 
 
@@ -77,7 +76,6 @@ def load_tickers(filename):
         return []
 
     with open(path, "r") as f:
-
         tickers = [
             line.strip().upper()
             for line in f
@@ -86,46 +84,6 @@ def load_tickers(filename):
 
     # Remove duplicates while preserving order
     return list(dict.fromkeys(tickers))
-
-
-# =========================================================
-# LOAD ALERT STATE
-# =========================================================
-
-def load_alert_state():
-
-    path = Path(STATE_FILE)
-
-    if not path.exists():
-        return {}
-
-    try:
-        with open(path, "r") as f:
-            return json.load(f)
-
-    except Exception:
-        return {}
-
-
-# =========================================================
-# SAVE ALERT STATE
-# =========================================================
-
-def save_alert_state(state):
-
-    try:
-        with open(STATE_FILE, "w") as f:
-
-            json.dump(
-                state,
-                f,
-                indent=4
-            )
-
-    except Exception as e:
-        st.warning(
-            f"Could not save alert state: {e}"
-        )
 
 
 # =========================================================
@@ -212,7 +170,7 @@ def get_date_from_calendar(stock):
             return None
 
         # -------------------------------------------------
-        # Newer yfinance versions may return dict
+        # Dictionary response
         # -------------------------------------------------
 
         if isinstance(calendar, dict):
@@ -233,7 +191,7 @@ def get_date_from_calendar(stock):
                         return date
 
         # -------------------------------------------------
-        # Other versions may return DataFrame
+        # DataFrame response
         # -------------------------------------------------
 
         if isinstance(
@@ -288,7 +246,7 @@ def get_date_from_calendar(stock):
 
 # =========================================================
 # METHOD 2:
-# GET EARNINGS DATE FROM EARNINGS HISTORY
+# GET DATE FROM UPCOMING / HISTORICAL EARNINGS
 # =========================================================
 
 def get_date_from_earnings_history(stock):
@@ -345,12 +303,8 @@ def get_date_from_info(stock):
         info = stock.info
 
         timestamp = (
-            info.get(
-                "earningsTimestamp"
-            )
-            or info.get(
-                "earningsTimestampStart"
-            )
+            info.get("earningsTimestamp")
+            or info.get("earningsTimestampStart")
         )
 
         if timestamp:
@@ -378,7 +332,10 @@ def get_next_earnings_date(ticker):
 
     stock = yf.Ticker(ticker)
 
-    # Method 1
+    # -----------------------------------------------------
+    # Method 1 - Yahoo Calendar
+    # -----------------------------------------------------
+
     date = get_date_from_calendar(
         stock
     )
@@ -390,7 +347,10 @@ def get_next_earnings_date(ticker):
             "Yahoo Calendar"
         )
 
-    # Method 2
+    # -----------------------------------------------------
+    # Method 2 - Earnings Dates
+    # -----------------------------------------------------
+
     date = get_date_from_earnings_history(
         stock
     )
@@ -402,7 +362,10 @@ def get_next_earnings_date(ticker):
             "Yahoo Earnings Dates"
         )
 
-    # Method 3
+    # -----------------------------------------------------
+    # Method 3 - Quote Metadata
+    # -----------------------------------------------------
+
     date = get_date_from_info(
         stock
     )
@@ -489,9 +452,7 @@ def scan_earnings(
 
     results = []
     failures = []
-    new_alerts = []
-
-    state = load_alert_state()
+    sent_alerts = []
 
     progress_bar = st.progress(0)
     status = st.empty()
@@ -514,7 +475,7 @@ def scan_earnings(
             )
 
             # ---------------------------------------------
-            # No earnings date found
+            # No earnings date returned
             # ---------------------------------------------
 
             if earnings_date is None:
@@ -538,8 +499,8 @@ def scan_earnings(
                 ).days
 
                 # -----------------------------------------
-                # Only care about earnings occurring
-                # within the next DAYS_AHEAD days
+                # Only earnings from today through
+                # DAYS_AHEAD
                 # -----------------------------------------
 
                 if (
@@ -564,29 +525,15 @@ def scan_earnings(
                         }
                     )
 
-                    # -------------------------------------
-                    # Unique alert key
-                    # -------------------------------------
+                    # =====================================
+                    # ALWAYS SEND EMAIL
+                    #
+                    # No duplicate protection.
+                    # Every qualifying ticker gets an email
+                    # every time this app runs.
+                    # =====================================
 
-                    date_string = (
-                        earnings_day.strftime(
-                            "%Y-%m-%d"
-                        )
-                    )
-
-                    alert_key = (
-                        f"{ticker}_{date_string}"
-                    )
-
-                    # -------------------------------------
-                    # Send only once for this ticker/date
-                    # -------------------------------------
-
-                    if (
-                        send_alerts
-                        and alert_key
-                        not in state
-                    ):
+                    if send_alerts:
 
                         success, error = (
                             send_earnings_alert(
@@ -599,46 +546,32 @@ def scan_earnings(
 
                         if success:
 
-                            state[alert_key] = {
-                                "ticker":
-                                    ticker,
-
-                                "earnings_date":
-                                    date_string,
-
-                                "source":
-                                    source,
-
-                                "days_until":
-                                    days_until,
-
-                                "alert_sent":
-                                    datetime.now()
-                                    .isoformat()
-                            }
-
-                            save_alert_state(
-                                state
-                            )
-
-                            new_alerts.append(
+                            sent_alerts.append(
                                 ticker
                             )
 
                         else:
 
-                            st.warning(
-                                f"Email failed "
-                                f"for {ticker}: "
-                                f"{error}"
+                            failures.append(
+                                {
+                                    "Ticker":
+                                        ticker,
+
+                                    "Reason":
+                                        f"Email failed: "
+                                        f"{error}"
+                                }
                             )
 
         except Exception as e:
 
             failures.append(
                 {
-                    "Ticker": ticker,
-                    "Reason": str(e)
+                    "Ticker":
+                        ticker,
+
+                    "Reason":
+                        str(e)
                 }
             )
 
@@ -655,12 +588,12 @@ def scan_earnings(
     return (
         pd.DataFrame(results),
         pd.DataFrame(failures),
-        new_alerts
+        sent_alerts
     )
 
 
 # =========================================================
-# SIDEBAR STATUS
+# SIDEBAR
 # =========================================================
 
 st.sidebar.header(
@@ -777,11 +710,9 @@ if st.sidebar.button(
 
 
 # =========================================================
-# AUTOMATIC DAILY SCAN
+# AUTOMATIC SCAN
 #
-# This runs whenever the Streamlit app is loaded/woken.
-# A scheduler such as GitHub Actions should wake the
-# application once each day.
+# This runs every time Streamlit executes this script.
 # =========================================================
 
 st.subheader(
@@ -796,7 +727,7 @@ st.info(
 
 scan_started = datetime.now()
 
-df, failures, new_alerts = (
+df, failures, sent_alerts = (
     scan_earnings(
         tickers,
         DAYS_AHEAD,
@@ -808,7 +739,7 @@ scan_finished = datetime.now()
 
 
 # =========================================================
-# SCAN STATUS
+# SCAN SUMMARY
 # =========================================================
 
 st.caption(
@@ -820,26 +751,25 @@ st.caption(
 
 
 # =========================================================
-# ALERT SUMMARY
+# EMAIL SUMMARY
 # =========================================================
 
-if new_alerts:
+if sent_alerts:
 
     st.success(
-        f"Sent {len(new_alerts)} "
-        f"new earnings alert(s): "
-        + ", ".join(new_alerts)
+        f"Sent {len(sent_alerts)} email alert(s): "
+        + ", ".join(sent_alerts)
     )
 
 else:
 
     st.info(
-        "No new email alerts were required."
+        "No email alerts were sent."
     )
 
 
 # =========================================================
-# UPCOMING EARNINGS RESULTS
+# UPCOMING EARNINGS TABLE
 # =========================================================
 
 if df.empty:
@@ -895,8 +825,8 @@ else:
     )
 
     c3.metric(
-        "New Alerts Sent",
-        len(new_alerts)
+        "Emails Sent",
+        len(sent_alerts)
     )
 
     st.dataframe(
@@ -916,20 +846,19 @@ else:
     st.download_button(
         label="Download CSV",
         data=csv,
-        file_name=
-            "upcoming_earnings.csv",
+        file_name="upcoming_earnings.csv",
         mime="text/csv"
     )
 
 
 # =========================================================
-# FAILED / UNKNOWN TICKERS
+# FAILURES / NO DATE
 # =========================================================
 
 if not failures.empty:
 
     with st.expander(
-        f"No Earnings Date Found "
+        f"Lookup / Email Issues "
         f"({len(failures)})"
     ):
 
@@ -938,74 +867,4 @@ if not failures.empty:
             use_container_width=True,
             hide_index=True
         )
-
-
-# =========================================================
-# EMAIL ALERT HISTORY
-# =========================================================
-
-st.divider()
-
-with st.expander(
-    "Email Alert History"
-):
-
-    state = load_alert_state()
-
-    if not state:
-
-        st.write(
-            "No earnings alerts "
-            "have been sent yet."
-        )
-
-    else:
-
-        history = []
-
-        for value in state.values():
-
-            history.append(
-                {
-                    "Ticker":
-                        value.get(
-                            "ticker"
-                        ),
-
-                    "Earnings Date":
-                        value.get(
-                            "earnings_date"
-                        ),
-
-                    "Days Away When Sent":
-                        value.get(
-                            "days_until"
-                        ),
-
-                    "Source":
-                        value.get(
-                            "source"
-                        ),
-
-                    "Alert Sent":
-                        value.get(
-                            "alert_sent"
-                        )
-                }
-            )
-
-        history_df = (
-            pd.DataFrame(
-                history
-            )
-            .sort_values(
-                "Alert Sent",
-                ascending=False
-            )
-        )
-
-        st.dataframe(
-            history_df,
-            use_container_width=True,
-            hide_index=True
-        )
+```
