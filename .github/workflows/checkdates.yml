@@ -2,20 +2,35 @@ name: Daily Earnings Check
 
 on:
   schedule:
+    # Runs every day at 13:00 UTC
     - cron: "0 13 * * *"
 
+  # Allows manual testing from GitHub Actions
   workflow_dispatch:
 
 jobs:
-  wake-streamlit:
+  earnings-check:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Wake Streamlit earnings scanner
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
         run: |
-          curl \
-            --max-time 120 \
-            --silent \
-            --show-error \
-            --output /dev/null \
-            "https://upcomingearnings.streamlit.app/"
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run earnings scanner
+        env:
+          GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          ALERT_EMAIL: ${{ secrets.ALERT_EMAIL }}
+        run: |
+          python earnings_scanner.py
