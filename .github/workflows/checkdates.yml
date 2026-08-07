@@ -13,7 +13,8 @@ jobs:
     steps:
       - name: Wake Streamlit earnings scanner
         run: |
-          curl --max-time 120 \
+          curl \
+            --max-time 120 \
             --silent \
             --show-error \
             --output /dev/null \
