@@ -8,12 +8,13 @@ on:
 
 jobs:
   wake-streamlit:
-
     runs-on: ubuntu-latest
 
     steps:
-
       - name: Wake Streamlit earnings scanner
         run: |
-          curl -L --max-time 120 \
-          "https://upcomingearnings.streamlit.app/"
+          curl --max-time 120 \
+            --silent \
+            --show-error \
+            --output /dev/null \
+            "https://upcomingearnings.streamlit.app/"
