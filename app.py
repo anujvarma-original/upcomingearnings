@@ -1,4 +1,3 @@
-```python
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -867,4 +866,3 @@ if not failures.empty:
             use_container_width=True,
             hide_index=True
         )
-```
