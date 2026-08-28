@@ -7,6 +7,8 @@ import smtplib
 from email.message import EmailMessage
 import time
 import re
+import base64
+import requests
 
 
 # =========================================================
@@ -115,6 +117,89 @@ def load_tickers(filename):
     return tickers
 
 
+def get_github_config():
+
+    """Return optional durable GitHub storage configuration."""
+
+    try:
+        github = st.secrets["github"]
+
+        return {
+            "token": github["token"],
+            "repository": github["repository"],
+            "branch": github.get("branch", "main"),
+            "ticker_path": github.get("ticker_path", "tickers.txt")
+        }
+
+    except Exception:
+        return None
+
+
+def github_headers(config):
+
+    return {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {config['token']}",
+        "X-GitHub-Api-Version": "2022-11-28"
+    }
+
+
+def get_github_ticker_file(config):
+
+    url = (
+        "https://api.github.com/repos/"
+        f"{config['repository']}/contents/"
+        f"{config['ticker_path']}"
+    )
+
+    response = requests.get(
+        url,
+        headers=github_headers(config),
+        params={"ref": config["branch"]},
+        timeout=20
+    )
+
+    if response.status_code == 404:
+        return None, None
+
+    response.raise_for_status()
+    data = response.json()
+
+    encoded_content = data.get("content", "").replace("\n", "")
+    contents = base64.b64decode(encoded_content).decode("utf-8")
+
+    return contents, data.get("sha")
+
+
+def load_persistent_tickers(filename):
+
+    config = get_github_config()
+
+    if config:
+        try:
+            contents, _ = get_github_ticker_file(config)
+
+            if contents is not None:
+                tickers, _ = normalize_tickers(contents)
+                return tickers, "GitHub", None
+
+            return (
+                load_tickers(filename),
+                "GitHub (not initialized)",
+                None
+            )
+
+        except Exception as e:
+            local_tickers = load_tickers(filename)
+            return (
+                local_tickers,
+                "Local fallback",
+                f"Could not load the GitHub ticker list: {e}"
+            )
+
+    return load_tickers(filename), "Local file", None
+
+
 def save_tickers(filename, raw_tickers):
 
     tickers, invalid_tickers = normalize_tickers(raw_tickers)
@@ -143,6 +228,85 @@ def save_tickers(filename, raw_tickers):
 
     except OSError as e:
         return False, tickers, f"Could not save tickers: {e}"
+
+
+def save_persistent_tickers(filename, raw_tickers):
+
+    tickers, invalid_tickers = normalize_tickers(raw_tickers)
+
+    if invalid_tickers:
+        return (
+            False,
+            tickers,
+            "Invalid ticker symbol(s): "
+            + ", ".join(invalid_tickers),
+            "Not saved"
+        )
+
+    if not tickers:
+        return (
+            False,
+            [],
+            "Enter at least one ticker symbol.",
+            "Not saved"
+        )
+
+    config = get_github_config()
+
+    if config:
+        try:
+            _, current_sha = get_github_ticker_file(config)
+
+            url = (
+                "https://api.github.com/repos/"
+                f"{config['repository']}/contents/"
+                f"{config['ticker_path']}"
+            )
+
+            payload = {
+                "message": "Update earnings monitor tickers from Streamlit UI",
+                "content": base64.b64encode(
+                    ("\n".join(tickers) + "\n").encode("utf-8")
+                ).decode("ascii"),
+                "branch": config["branch"]
+            }
+
+            if current_sha:
+                payload["sha"] = current_sha
+
+            response = requests.put(
+                url,
+                headers=github_headers(config),
+                json=payload,
+                timeout=20
+            )
+            response.raise_for_status()
+
+            # Keep the running instance synchronized too.
+            local_success, _, local_error = save_tickers(
+                filename,
+                tickers
+            )
+
+            if not local_success:
+                return False, tickers, local_error, "GitHub"
+
+            return True, tickers, None, "GitHub"
+
+        except Exception as e:
+            return (
+                False,
+                tickers,
+                f"Could not save tickers to GitHub: {e}",
+                "GitHub"
+            )
+
+    success, saved_tickers, error = save_tickers(
+        filename,
+        tickers
+    )
+
+    return success, saved_tickers, error, "Local file"
 
 
 # =========================================================
@@ -690,9 +854,35 @@ else:
 # LOAD TICKERS
 # =========================================================
 
-tickers = load_tickers(
+tickers, ticker_storage, ticker_load_error = load_persistent_tickers(
     TICKER_FILE
 )
+
+if ticker_load_error:
+    st.sidebar.warning(ticker_load_error)
+
+if ticker_storage.startswith("GitHub"):
+    st.sidebar.success(f"Ticker persistence: {ticker_storage}")
+else:
+    st.sidebar.warning(
+        "Ticker persistence: local file only. Configure the "
+        "[github] section in Streamlit Secrets to retain UI changes "
+        "after an app restart."
+    )
+
+    with st.sidebar.expander("Persistent storage setup"):
+        st.code(
+            '''[github]
+token = "YOUR_FINE_GRAINED_GITHUB_TOKEN"
+repository = "YOUR_GITHUB_USERNAME/upcomingearnings"
+branch = "main"
+ticker_path = "tickers.txt"''',
+            language="toml"
+        )
+        st.caption(
+            "The token needs Contents: Read and write permission "
+            "for the upcomingearnings repository."
+        )
 
 with st.sidebar.expander(
     "Manage Tickers",
@@ -720,7 +910,7 @@ with st.sidebar.expander(
 
     if save_ticker_button:
 
-        success, saved_tickers, error = save_tickers(
+        success, saved_tickers, error, saved_to = save_persistent_tickers(
             TICKER_FILE,
             ticker_text
         )
@@ -729,7 +919,7 @@ with st.sidebar.expander(
             tickers = saved_tickers
             st.success(
                 f"Saved {len(tickers)} ticker(s). "
-                "They will be retained for future runs."
+                f"Storage: {saved_to}."
             )
         else:
             st.error(error)
