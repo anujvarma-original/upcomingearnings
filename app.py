@@ -6,13 +6,16 @@ from datetime import datetime
 import smtplib
 from email.message import EmailMessage
 import time
+import re
 
 
 # =========================================================
 # CONFIGURATION
 # =========================================================
 
-TICKER_FILE = "tickers.txt"
+# Keep the ticker list beside this script so UI changes are retained even
+# when Streamlit is launched from a different working directory.
+TICKER_FILE = Path(__file__).resolve().parent / "tickers.txt"
 
 # Alert on earnings occurring within the next 10 days
 DAYS_AHEAD = 10
@@ -66,7 +69,38 @@ except Exception:
 # LOAD TICKERS
 # =========================================================
 
-@st.cache_data
+def normalize_tickers(raw_tickers):
+
+    """Normalize, validate, and de-duplicate ticker symbols."""
+
+    if isinstance(raw_tickers, str):
+        candidates = re.split(r"[\s,;]+", raw_tickers)
+    else:
+        candidates = raw_tickers
+
+    valid_tickers = []
+    invalid_tickers = []
+
+    for value in candidates:
+
+        ticker = str(value).strip().upper()
+
+        if not ticker:
+            continue
+
+        # Supports common Yahoo symbols such as BRK-B, BTC-USD, ^GSPC,
+        # 0005.HK and futures symbols ending in =F.
+        if re.fullmatch(r"[A-Z0-9.^=+-]+", ticker):
+            valid_tickers.append(ticker)
+        else:
+            invalid_tickers.append(ticker)
+
+    return (
+        list(dict.fromkeys(valid_tickers)),
+        list(dict.fromkeys(invalid_tickers))
+    )
+
+
 def load_tickers(filename):
 
     path = Path(filename)
@@ -74,15 +108,41 @@ def load_tickers(filename):
     if not path.exists():
         return []
 
-    with open(path, "r") as f:
-        tickers = [
-            line.strip().upper()
-            for line in f
-            if line.strip()
-        ]
+    with open(path, "r", encoding="utf-8") as f:
+        contents = f.read()
 
-    # Remove duplicates while preserving order
-    return list(dict.fromkeys(tickers))
+    tickers, _ = normalize_tickers(contents)
+    return tickers
+
+
+def save_tickers(filename, raw_tickers):
+
+    tickers, invalid_tickers = normalize_tickers(raw_tickers)
+
+    if invalid_tickers:
+        return (
+            False,
+            tickers,
+            "Invalid ticker symbol(s): "
+            + ", ".join(invalid_tickers)
+        )
+
+    if not tickers:
+        return False, [], "Enter at least one ticker symbol."
+
+    path = Path(filename)
+
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+        # Write a clean, predictable file with one ticker per line.
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n".join(tickers) + "\n")
+
+        return True, tickers, None
+
+    except OSError as e:
+        return False, tickers, f"Could not save tickers: {e}"
 
 
 # =========================================================
@@ -634,14 +694,45 @@ tickers = load_tickers(
     TICKER_FILE
 )
 
-if not tickers:
+with st.sidebar.expander(
+    "Manage Tickers",
+    expanded=not bool(tickers)
+):
 
-    st.error(
-        f"No tickers found in "
-        f"{TICKER_FILE}."
+    st.caption(
+        "Add, edit, or remove symbols below. "
+        "Use one ticker per line, or separate them with commas."
     )
 
-    st.stop()
+    with st.form("ticker_manager_form"):
+
+        ticker_text = st.text_area(
+            "Monitored tickers",
+            value="\n".join(tickers),
+            height=220,
+            placeholder="NVDA\nAMD\nMSFT"
+        )
+
+        save_ticker_button = st.form_submit_button(
+            "Save Tickers",
+            use_container_width=True
+        )
+
+    if save_ticker_button:
+
+        success, saved_tickers, error = save_tickers(
+            TICKER_FILE,
+            ticker_text
+        )
+
+        if success:
+            tickers = saved_tickers
+            st.success(
+                f"Saved {len(tickers)} ticker(s). "
+                "They will be retained for future runs."
+            )
+        else:
+            st.error(error)
 
 
 st.sidebar.metric(
@@ -651,12 +742,23 @@ st.sidebar.metric(
 
 
 with st.sidebar.expander(
-    "View Tickers"
+    "View Saved Tickers"
 ):
 
-    st.write(
-        ", ".join(tickers)
+    if tickers:
+        st.write(", ".join(tickers))
+    else:
+        st.caption("No tickers have been saved yet.")
+
+
+if not tickers:
+
+    st.error(
+        "No tickers are configured. Open **Manage Tickers** "
+        "in the sidebar, enter the symbols to monitor, and save them."
     )
+
+    st.stop()
 
 
 # =========================================================
